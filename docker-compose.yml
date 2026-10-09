@@ -1,0 +1,27 @@
+services:
+  tunnel:
+    image: cloudflare/cloudflared:latest
+    command: tunnel run
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN}
+    restart: unless-stopped
+    networks:
+      - proxy
+
+networks:
+  proxy:
+    name: proxy_network
+    external: true
+  nextjs:
+    build:
+      context: ./domotik
+      dockerfile: Dockerfile
+    ports:
+      - "${HOST_PORT:-3001}:3000"
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=development
+      - HOSTNAME=0.0.0.0
+      - PORT=3000
+      - WATCHPACK_POLLING=true
+    command: npm run dev
