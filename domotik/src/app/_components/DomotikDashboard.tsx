@@ -13,8 +13,7 @@ import {
   Signal,
   AlertCircle,
   Edit2,
-  X,
-  Check,
+  PlugZap,
 } from "lucide-react";
 
 interface PiStats {
@@ -87,7 +86,7 @@ export default function DomotikDashboard() {
     newName: "",
   });
 
-  // Référence pour détecter le changement d'état de la porte (Notification)
+  // Détection d'état pour la notification
   const lastDoorContactRef = useRef<boolean | null>(null);
 
   // Vérifier la permission des notifications au chargement
@@ -101,7 +100,6 @@ export default function DomotikDashboard() {
     }
   }, []);
 
-  // Activer / Désactiver les notifications
   const toggleNotifications = async () => {
     if (typeof window === "undefined" || !("Notification" in window)) {
       alert("Ce navigateur ne supporte pas les notifications.");
@@ -129,7 +127,6 @@ export default function DomotikDashboard() {
     }
   };
 
-  // Récupérer l'état MQTT
   const fetchMqtt = useCallback(async () => {
     try {
       const res = await fetch("/api/mqtt");
@@ -138,11 +135,10 @@ export default function DomotikDashboard() {
         setMqttStatus(data);
       }
     } catch {
-      // Ignorer silencieusement pour éviter le spam console
+      // Ignorer
     }
   }, []);
 
-  // Récupérer les stats Pi
   const fetchStats = useCallback(async () => {
     try {
       const res = await fetch("/api/stats");
@@ -166,7 +162,6 @@ export default function DomotikDashboard() {
     setIsRefreshing(false);
   };
 
-  // Couplage Zigbee (Permit join)
   const togglePairing = async (enable: boolean) => {
     await fetch("/api/mqtt", {
       method: "POST",
@@ -176,7 +171,6 @@ export default function DomotikDashboard() {
     fetchMqtt();
   };
 
-  // Prise ON/OFF
   const togglePlug = async (name: string, currentState: string) => {
     const nextState = currentState === "ON" ? "OFF" : "ON";
     await fetch("/api/mqtt", {
@@ -190,7 +184,6 @@ export default function DomotikDashboard() {
     setTimeout(fetchMqtt, 300);
   };
 
-  // Renommer
   const submitRename = async () => {
     if (!renameModal.newName.trim()) return;
     await fetch("/api/mqtt", {
@@ -206,7 +199,6 @@ export default function DomotikDashboard() {
     setTimeout(handleRefresh, 500);
   };
 
-  // Polling régulier
   useEffect(() => {
     fetchMqtt();
     fetchStats();
@@ -218,7 +210,6 @@ export default function DomotikDashboard() {
     };
   }, [fetchMqtt, fetchStats]);
 
-  // Map des données MQTT
   const payloadsMap = useMemo(() => {
     const map = new Map<string, Record<string, unknown>>();
     mqttStatus?.devices?.forEach((d) => {
@@ -228,8 +219,15 @@ export default function DomotikDashboard() {
     return map;
   }, [mqttStatus?.devices]);
 
-  // Filtrage des appareils
+  // VRAI ÉTAT DE LA CLÉ ZIGBEE : Est-elle connectée et en ligne ?
+  const isKeyConnected = Boolean(mqttStatus?.connected && mqttStatus?.bridgeState === "online");
+
+  // Filtrage des appareils RÉELS (aucun mock en dur)
   const { doorSensor, plug, allDevices } = useMemo(() => {
+    if (!isKeyConnected) {
+      return { doorSensor: null, plug: null, allDevices: [] };
+    }
+
     const bridgeDevs = (mqttStatus?.bridgeDevices || []).filter((d) => d.type !== "Coordinator");
     const deviceNames = new Set<string>();
 
@@ -239,24 +237,19 @@ export default function DomotikDashboard() {
       if (!name.startsWith("bridge")) deviceNames.add(name);
     });
 
-    if (deviceNames.size === 0) {
-      deviceNames.add("0x8c73dafffeceac07");
-      deviceNames.add("0xa4c13810f2d8ffff");
-    }
-
     let detectedDoor: DoorSensorData | null = null;
     let detectedPlug: PlugData | null = null;
     const others: Array<{ name: string; type: string; info: string }> = [];
 
     for (const name of deviceNames) {
       const payload = payloadsMap.get(name) || {};
-      const isDoor = payload.contact !== undefined || name.includes("8c73dafffeceac07");
-      const isPlug = !isDoor && (payload.state !== undefined || name.includes("a4c13810f2d8ffff"));
+      const isDoor = payload.contact !== undefined;
+      const isPlug = !isDoor && payload.state !== undefined;
 
       if (isDoor && !detectedDoor) {
         detectedDoor = {
           name,
-          contact: payload.contact !== undefined ? Boolean(payload.contact) : true,
+          contact: Boolean(payload.contact),
           battery: typeof payload.battery === "number" ? payload.battery : 100,
           tamper: Boolean(payload.tamper),
           lqi: typeof payload.linkquality === "number" ? payload.linkquality : 200,
@@ -279,23 +272,16 @@ export default function DomotikDashboard() {
     }
 
     return {
-      doorSensor: detectedDoor || {
-        name: "0x8c73dafffeceac07",
-        contact: true,
-        battery: 100,
-        tamper: false,
-        lqi: 207,
-      },
+      doorSensor: detectedDoor,
       plug: detectedPlug,
       allDevices: others,
     };
-  }, [mqttStatus, payloadsMap]);
+  }, [isKeyConnected, mqttStatus, payloadsMap]);
 
-  // Surveillance de la porte pour envoyer la notification navigateur
+  // Surveillance porte pour les notifications navigateur
   useEffect(() => {
     if (doorSensor) {
       if (lastDoorContactRef.current !== null) {
-        // La porte était fermée (true) et vient de s'ouvrir (false)
         if (lastDoorContactRef.current === true && doorSensor.contact === false) {
           if (notifEnabled && typeof window !== "undefined" && "Notification" in window && Notification.permission === "granted") {
             new Notification("Alerte Porte Ouverte", {
@@ -316,21 +302,41 @@ export default function DomotikDashboard() {
     <div className="min-h-screen bg-[#0b0f19] text-slate-200 antialiased p-4 sm:p-8 font-sans">
       <div className="max-w-4xl mx-auto space-y-6">
 
-        {/* HEADER SIMPLE & PROPRE */}
+        {/* HEADER */}
         <header className="flex flex-col sm:flex-row sm:items-center justify-between pb-4 border-b border-slate-800 gap-4">
           <div>
             <div className="flex items-center gap-3">
               <h1 className="text-xl font-semibold text-white tracking-tight">Domotik</h1>
-              <span className="flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-medium bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
-                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>
-                {mqttStatus?.connected ? "En ligne" : "Hors ligne"}
+              <span
+                className={`flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-medium border ${
+                  !mqttStatus?.connected
+                    ? "bg-rose-500/10 text-rose-400 border-rose-500/20"
+                    : isKeyConnected
+                    ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/20"
+                    : "bg-amber-500/10 text-amber-400 border-amber-500/20"
+                }`}
+              >
+                <span
+                  className={`w-1.5 h-1.5 rounded-full ${
+                    !mqttStatus?.connected
+                      ? "bg-rose-400"
+                      : isKeyConnected
+                      ? "bg-emerald-400"
+                      : "bg-amber-400 animate-ping"
+                  }`}
+                ></span>
+                {!mqttStatus?.connected
+                  ? "Mosquitto déconnecté"
+                  : isKeyConnected
+                  ? "Clé Zigbee connectée"
+                  : "Clé Zigbee en attente"}
               </span>
             </div>
             <p className="text-xs text-slate-400 mt-1">Supervision Sonoff &amp; Mosquitto</p>
           </div>
 
           <div className="flex items-center gap-2">
-            {/* Bouton Notification Navigateur */}
+            {/* Bouton Notification */}
             <button
               onClick={toggleNotifications}
               className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium border transition ${
@@ -344,11 +350,14 @@ export default function DomotikDashboard() {
               <span>{notifEnabled ? "Notifs ON" : "Activer notifs"}</span>
             </button>
 
-            {/* Bouton Appairage */}
+            {/* Bouton Appairage (actif seulement si clé connectée) */}
             <button
               onClick={() => togglePairing(!isPairing)}
+              disabled={!isKeyConnected}
               className={`flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-xs font-medium border transition ${
-                isPairing
+                !isKeyConnected
+                  ? "opacity-40 cursor-not-allowed bg-slate-900 border-slate-800 text-slate-500"
+                  : isPairing
                   ? "bg-amber-500/20 border-amber-500/40 text-amber-300 animate-pulse"
                   : "bg-slate-900 border-slate-800 text-slate-300 hover:bg-slate-800"
               }`}
@@ -369,122 +378,155 @@ export default function DomotikDashboard() {
           </div>
         </header>
 
-        {/* CARTE PRINCIPALE : PORTE */}
-        <section>
-          <div className="p-6 rounded-2xl bg-slate-900/70 border border-slate-800/80 shadow-sm flex flex-col sm:flex-row sm:items-center justify-between gap-6">
-            <div className="flex items-center gap-4">
-              <div
-                className={`w-14 h-14 rounded-xl flex items-center justify-center transition-colors ${
-                  doorSensor.contact
-                    ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20"
-                    : "bg-rose-500/15 text-rose-400 border border-rose-500/30"
-                }`}
-              >
-                {doorSensor.contact ? <DoorClosed className="w-7 h-7" /> : <DoorOpen className="w-7 h-7" />}
-              </div>
-
-              <div>
-                <div className="flex items-center gap-2">
-                  <h2 className="text-base font-semibold text-white">{doorSensor.name}</h2>
-                  <button
-                    onClick={() =>
-                      setRenameModal({
-                        open: true,
-                        currentName: doorSensor.name,
-                        newName: doorSensor.name,
-                      })
-                    }
-                    className="text-slate-500 hover:text-slate-300 p-0.5"
-                    title="Renommer"
-                  >
-                    <Edit2 className="w-3 h-3" />
-                  </button>
-                </div>
-                <div className="flex items-center gap-2 mt-1">
-                  <span
-                    className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-semibold ${
-                      doorSensor.contact
-                        ? "bg-emerald-500/15 text-emerald-400"
-                        : "bg-rose-500/20 text-rose-300 animate-pulse"
-                    }`}
-                  >
-                    {doorSensor.contact ? "Fermée" : "Ouverte"}
-                  </span>
-                  {doorSensor.tamper && (
-                    <span className="inline-flex items-center gap-1 text-[11px] text-amber-400">
-                      <AlertCircle className="w-3 h-3" /> Altéré
-                    </span>
-                  )}
-                </div>
-              </div>
+        {/* ÉTAT 1 : CLÉ ZIGBEE NON CONNECTÉE */}
+        {!isKeyConnected ? (
+          <div className="py-16 px-6 rounded-2xl bg-slate-900/40 border border-dashed border-slate-800 text-center space-y-4">
+            <div className="w-16 h-16 mx-auto rounded-2xl bg-amber-500/10 text-amber-400 border border-amber-500/20 flex items-center justify-center">
+              <Radio className="w-8 h-8 opacity-70 animate-pulse" />
             </div>
-
-            {/* Infos rapides capteur */}
-            <div className="flex items-center gap-6 text-xs text-slate-400 border-t sm:border-t-0 sm:border-l border-slate-800 pt-3 sm:pt-0 sm:pl-6">
-              <div className="flex items-center gap-2">
-                <Battery className="w-4 h-4 text-slate-300" />
-                <span>{doorSensor.battery}% pile</span>
-              </div>
-              <div className="flex items-center gap-2">
-                <Signal className="w-4 h-4 text-slate-300" />
-                <span>{doorSensor.lqi} LQI</span>
-              </div>
+            <div className="space-y-1">
+              <h2 className="text-xl font-semibold text-white tracking-tight">Clé Zigbee non connectée</h2>
+              <p className="text-xs text-slate-400 max-w-sm mx-auto">
+                Le coordinateur Zigbee USB Sonoff n'est pas détecté. Veuillez brancher la clé USB sur le Raspberry Pi.
+              </p>
+            </div>
+            <div className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-slate-800/80 border border-slate-700/60 text-[11px] text-slate-300 font-mono">
+              <span className="w-2 h-2 rounded-full bg-amber-400 animate-ping"></span>
+              <span>Détection automatique en cours (aucun redémarrage requis)...</span>
             </div>
           </div>
-        </section>
-
-        {/* PRISE CONNECTÉE (si disponible) */}
-        {plug && (
-          <section>
-            <div className="p-5 rounded-2xl bg-slate-900/70 border border-slate-800/80 shadow-sm flex items-center justify-between">
-              <div className="flex items-center gap-4">
-                <div
-                  className={`w-11 h-11 rounded-xl flex items-center justify-center ${
-                    plug.state === "ON"
-                      ? "bg-amber-500/10 text-amber-400 border border-amber-500/20"
-                      : "bg-slate-800 text-slate-500"
-                  }`}
-                >
-                  <Power className="w-5 h-5" />
-                </div>
-                <div>
-                  <h3 className="text-sm font-semibold text-white">{plug.name}</h3>
-                  <p className="text-xs text-slate-400 mt-0.5">{plug.power} W • {plug.voltage} V</p>
-                </div>
+        ) : (
+          /* ÉTAT 2 : CLÉ CONNECTÉE - AFFICHAGE DES VRAIS APPAREILS */
+          <div className="space-y-6">
+            {/* Si aucun appareil couplé du tout */}
+            {!doorSensor && !plug && allDevices.length === 0 && (
+              <div className="p-8 rounded-2xl bg-slate-900/40 border border-slate-800 text-center space-y-2">
+                <p className="text-sm font-medium text-slate-300">Clé Zigbee connectée (0 appareil associé)</p>
+                <p className="text-xs text-slate-400">
+                  Cliquez sur &laquo; Appairer (API) &raquo; pour autoriser le couplage de vos équipements.
+                </p>
               </div>
+            )}
 
-              <button
-                onClick={() => togglePlug(plug.name, plug.state)}
-                className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold transition ${
-                  plug.state === "ON"
-                    ? "bg-amber-500 text-slate-950 hover:bg-amber-400"
-                    : "bg-slate-800 text-slate-300 hover:bg-slate-700 border border-slate-700"
-                }`}
-              >
-                {plug.state === "ON" ? "Allumé" : "Éteint"}
-              </button>
-            </div>
-          </section>
-        )}
+            {/* CARTE PORTE (si un capteur de porte est appairé) */}
+            {doorSensor && (
+              <section>
+                <div className="p-6 rounded-2xl bg-slate-900/70 border border-slate-800/80 shadow-sm flex flex-col sm:flex-row sm:items-center justify-between gap-6">
+                  <div className="flex items-center gap-4">
+                    <div
+                      className={`w-14 h-14 rounded-xl flex items-center justify-center transition-colors ${
+                        doorSensor.contact
+                          ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20"
+                          : "bg-rose-500/15 text-rose-400 border border-rose-500/30"
+                      }`}
+                    >
+                      {doorSensor.contact ? <DoorClosed className="w-7 h-7" /> : <DoorOpen className="w-7 h-7" />}
+                    </div>
 
-        {/* AUTRES APPAREILS APPÉRÉS */}
-        {allDevices.length > 0 && (
-          <section className="space-y-2">
-            <h3 className="text-xs font-medium text-slate-400 uppercase tracking-wider">
-              Autres équipements ({allDevices.length})
-            </h3>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-              {allDevices.map((d) => (
-                <div
-                  key={d.name}
-                  className="p-3 rounded-xl bg-slate-900/40 border border-slate-800/60 flex items-center justify-between text-xs"
-                >
-                  <span className="font-medium text-slate-300">{d.name}</span>
-                  <span className="text-slate-500">{d.info}</span>
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <h2 className="text-base font-semibold text-white">{doorSensor.name}</h2>
+                        <button
+                          onClick={() =>
+                            setRenameModal({
+                              open: true,
+                              currentName: doorSensor.name,
+                              newName: doorSensor.name,
+                            })
+                          }
+                          className="text-slate-500 hover:text-slate-300 p-0.5"
+                          title="Renommer"
+                        >
+                          <Edit2 className="w-3 h-3" />
+                        </button>
+                      </div>
+                      <div className="flex items-center gap-2 mt-1">
+                        <span
+                          className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-semibold ${
+                            doorSensor.contact
+                              ? "bg-emerald-500/15 text-emerald-400"
+                              : "bg-rose-500/20 text-rose-300 animate-pulse"
+                          }`}
+                        >
+                          {doorSensor.contact ? "Fermée" : "Ouverte"}
+                        </span>
+                        {doorSensor.tamper && (
+                          <span className="inline-flex items-center gap-1 text-[11px] text-amber-400">
+                            <AlertCircle className="w-3 h-3" /> Altéré
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-6 text-xs text-slate-400 border-t sm:border-t-0 sm:border-l border-slate-800 pt-3 sm:pt-0 sm:pl-6">
+                    <div className="flex items-center gap-2">
+                      <Battery className="w-4 h-4 text-slate-300" />
+                      <span>{doorSensor.battery}% pile</span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <Signal className="w-4 h-4 text-slate-300" />
+                      <span>{doorSensor.lqi} LQI</span>
+                    </div>
+                  </div>
                 </div>
-              ))}
-            </div>
-          </section>
+              </section>
+            )}
+
+            {/* CARTE PRISE (si une prise est appairée) */}
+            {plug && (
+              <section>
+                <div className="p-5 rounded-2xl bg-slate-900/70 border border-slate-800/80 shadow-sm flex items-center justify-between">
+                  <div className="flex items-center gap-4">
+                    <div
+                      className={`w-11 h-11 rounded-xl flex items-center justify-center ${
+                        plug.state === "ON"
+                          ? "bg-amber-500/10 text-amber-400 border border-amber-500/20"
+                          : "bg-slate-800 text-slate-500"
+                      }`}
+                    >
+                      <Power className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <h3 className="text-sm font-semibold text-white">{plug.name}</h3>
+                      <p className="text-xs text-slate-400 mt-0.5">{plug.power} W • {plug.voltage} V</p>
+                    </div>
+                  </div>
+
+                  <button
+                    onClick={() => togglePlug(plug.name, plug.state)}
+                    className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold transition ${
+                      plug.state === "ON"
+                        ? "bg-amber-500 text-slate-950 hover:bg-amber-400"
+                        : "bg-slate-800 text-slate-300 hover:bg-slate-700 border border-slate-700"
+                    }`}
+                  >
+                    {plug.state === "ON" ? "Allumé" : "Éteint"}
+                  </button>
+                </div>
+              </section>
+            )}
+
+            {/* AUTRES ÉQUIPEMENTS */}
+            {allDevices.length > 0 && (
+              <section className="space-y-2">
+                <h3 className="text-xs font-medium text-slate-400 uppercase tracking-wider">
+                  Autres équipements ({allDevices.length})
+                </h3>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  {allDevices.map((d) => (
+                    <div
+                      key={d.name}
+                      className="p-3 rounded-xl bg-slate-900/40 border border-slate-800/60 flex items-center justify-between text-xs"
+                    >
+                      <span className="font-medium text-slate-300">{d.name}</span>
+                      <span className="text-slate-500">{d.info}</span>
+                    </div>
+                  ))}
+                </div>
+              </section>
+            )}
+          </div>
         )}
 
         {/* PI STATS BAS DE PAGE */}
