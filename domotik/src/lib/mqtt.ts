@@ -53,6 +53,13 @@ class MqttManager {
 
             // Au démarrage : forcer Zigbee2MQTT à renvoyer les appareils et l'état
             this.refreshDevices();
+
+            // Répéter régulièrement pour détecter tout appareil se réveillant ou étant appairé
+            setInterval(() => {
+              if (this.isConnected && this.bridgeState === "online") {
+                this.refreshDevices();
+              }
+            }, 5000);
           }
         });
       });
@@ -67,6 +74,11 @@ class MqttManager {
               this.bridgeState = parsed.state || payloadStr;
             } catch {
               this.bridgeState = payloadStr;
+            }
+            console.log(`[MQTT] État coordinateur Zigbee2MQTT: ${this.bridgeState}`);
+            if (this.bridgeState === "online") {
+              // Interroger immédiatement Zigbee2MQTT pour récupérer tous les appareils appairés
+              this.refreshDevices();
             }
             return;
           }

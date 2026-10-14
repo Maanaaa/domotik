@@ -56,15 +56,21 @@ interface MqttStatus {
   permitJoinTimeout: number;
 }
 
+const DEFAULT_DOOR_ID = "0x8c73dafffeceac07";
+const DEFAULT_PLUG_ID = "0xa4c13810f2d8ffff";
+
 interface DoorSensorData {
+  id: string;
   name: string;
   contact: boolean;
   battery: number;
   tamper: boolean;
   lqi: number;
+  hasReceivedPayload: boolean;
 }
 
 interface PlugData {
+  id: string;
   name: string;
   state: string;
   power: number;
@@ -78,6 +84,7 @@ export default function DomotikDashboard() {
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [notifPermission, setNotifPermission] = useState<NotificationPermission>("default");
   const [notifEnabled, setNotifEnabled] = useState(false);
+  const [customNames, setCustomNames] = useState<Record<string, string>>({});
 
   // Modal renommage
   const [renameModal, setRenameModal] = useState<{ open: boolean; currentName: string; newName: string }>({
@@ -89,13 +96,22 @@ export default function DomotikDashboard() {
   // Détection d'état pour la notification
   const lastDoorContactRef = useRef<boolean | null>(null);
 
-  // Vérifier la permission des notifications au chargement
+  // Charger les noms personnalisés et les permissions au montage
   useEffect(() => {
-    if (typeof window !== "undefined" && "Notification" in window) {
-      setNotifPermission(Notification.permission);
-      const saved = localStorage.getItem("domotik_notifs");
-      if (saved === "true" && Notification.permission === "granted") {
-        setNotifEnabled(true);
+    if (typeof window !== "undefined") {
+      try {
+        const savedNames = localStorage.getItem("domotik_custom_names");
+        if (savedNames) setCustomNames(JSON.parse(savedNames));
+      } catch {
+        // Ignorer
+      }
+
+      if ("Notification" in window) {
+        setNotifPermission(Notification.permission);
+        const savedNotifs = localStorage.getItem("domotik_notifs");
+        if (savedNotifs === "true" && Notification.permission === "granted") {
+          setNotifEnabled(true);
+        }
       }
     }
   }, []);
@@ -151,7 +167,7 @@ export default function DomotikDashboard() {
     }
   }, []);
 
-  const handleRefresh = async () => {
+  const handleRefresh = useCallback(async () => {
     setIsRefreshing(true);
     await fetch("/api/mqtt", {
       method: "POST",
@@ -160,7 +176,7 @@ export default function DomotikDashboard() {
     });
     await Promise.all([fetchMqtt(), fetchStats()]);
     setIsRefreshing(false);
-  };
+  }, [fetchMqtt, fetchStats]);
 
   const togglePairing = async (enable: boolean) => {
     await fetch("/api/mqtt", {
@@ -186,18 +202,39 @@ export default function DomotikDashboard() {
 
   const submitRename = async () => {
     if (!renameModal.newName.trim()) return;
+    const name = renameModal.newName.trim();
+    const from = renameModal.currentName;
+
+    // Sauvegarder dans localStorage
+    const updated = { ...customNames, [from]: name };
+    setCustomNames(updated);
+    if (typeof window !== "undefined") {
+      localStorage.setItem("domotik_custom_names", JSON.stringify(updated));
+    }
+
+    // Sauvegarder dans Zigbee2MQTT
     await fetch("/api/mqtt", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         action: "rename",
-        from: renameModal.currentName,
-        to: renameModal.newName.trim(),
+        from,
+        to: name,
       }),
     });
     setRenameModal({ open: false, currentName: "", newName: "" });
     setTimeout(handleRefresh, 500);
   };
+
+  // VRAI ÉTAT DE LA CLÉ ZIGBEE : Est-elle connectée et en ligne ?
+  const isKeyConnected = Boolean(mqttStatus?.connected && mqttStatus?.bridgeState === "online");
+
+  // Dès que la clé devient en ligne, lancer immédiatement un refresh automatique
+  useEffect(() => {
+    if (isKeyConnected) {
+      handleRefresh();
+    }
+  }, [isKeyConnected, handleRefresh]);
 
   useEffect(() => {
     fetchMqtt();
@@ -219,54 +256,95 @@ export default function DomotikDashboard() {
     return map;
   }, [mqttStatus?.devices]);
 
-  // VRAI ÉTAT DE LA CLÉ ZIGBEE : Est-elle connectée et en ligne ?
-  const isKeyConnected = Boolean(mqttStatus?.connected && mqttStatus?.bridgeState === "online");
-
-  // Filtrage des appareils RÉELS (aucun mock en dur)
+  // Détection et reconnaissance rapide des appareils IOT
   const { doorSensor, plug, allDevices } = useMemo(() => {
     if (!isKeyConnected) {
       return { doorSensor: null, plug: null, allDevices: [] };
     }
 
     const bridgeDevs = (mqttStatus?.bridgeDevices || []).filter((d) => d.type !== "Coordinator");
-    const deviceNames = new Set<string>();
+    const knownIds = new Set<string>();
 
-    bridgeDevs.forEach((d) => deviceNames.add(d.friendly_name));
+    // 1. Enregistrer les appareils IOT déjà connus et appairés
+    knownIds.add(DEFAULT_DOOR_ID);
+    knownIds.add(DEFAULT_PLUG_ID);
+
+    // 2. Ajouter les appareils retournés par Zigbee2MQTT
+    bridgeDevs.forEach((d) => {
+      if (d.friendly_name) knownIds.add(d.friendly_name);
+      if (d.ieee_address) knownIds.add(d.ieee_address);
+    });
+
+    // 3. Ajouter les topics MQTT reçus
     mqttStatus?.devices?.forEach((d) => {
       const name = d.topic.replace("zigbee2mqtt/", "");
-      if (!name.startsWith("bridge")) deviceNames.add(name);
+      if (!name.startsWith("bridge")) knownIds.add(name);
     });
 
     let detectedDoor: DoorSensorData | null = null;
     let detectedPlug: PlugData | null = null;
     const others: Array<{ name: string; type: string; info: string }> = [];
 
-    for (const name of deviceNames) {
-      const payload = payloadsMap.get(name) || {};
-      const isDoor = payload.contact !== undefined;
-      const isPlug = !isDoor && payload.state !== undefined;
+    for (const id of knownIds) {
+      // Trouver la définition Zigbee2MQTT si existante
+      const bDev = bridgeDevs.find((b) => b.friendly_name === id || b.ieee_address === id);
+      const desc = bDev?.definition?.description?.toLowerCase() || "";
+      const model = bDev?.definition?.model?.toLowerCase() || "";
+      const friendly = bDev?.friendly_name || id;
+
+      // Récupérer le payload MQTT s'il y en a un
+      const payload = payloadsMap.get(id) || payloadsMap.get(friendly) || {};
+      const hasPayload = Object.keys(payload).length > 0;
+
+      // Détecter si c'est le capteur d'ouverture de porte
+      const isDoor =
+        id === DEFAULT_DOOR_ID ||
+        friendly === DEFAULT_DOOR_ID ||
+        payload.contact !== undefined ||
+        desc.includes("contact") ||
+        desc.includes("door") ||
+        desc.includes("window") ||
+        friendly.toLowerCase().includes("porte") ||
+        model.includes("snzb-04") ||
+        model.includes("mccgq11lm");
+
+      // Détecter si c'est la prise
+      const isPlug =
+        !isDoor &&
+        (id === DEFAULT_PLUG_ID ||
+          friendly === DEFAULT_PLUG_ID ||
+          payload.state !== undefined ||
+          desc.includes("plug") ||
+          desc.includes("socket") ||
+          desc.includes("outlet") ||
+          friendly.toLowerCase().includes("prise"));
+
+      const displayName = customNames[id] || customNames[friendly] || (bDev?.friendly_name && bDev.friendly_name !== id ? bDev.friendly_name : (isDoor ? "Capteur Porte" : isPlug ? "Prise Salon" : id));
 
       if (isDoor && !detectedDoor) {
         detectedDoor = {
-          name,
-          contact: Boolean(payload.contact),
+          id,
+          name: displayName,
+          contact: payload.contact !== undefined ? Boolean(payload.contact) : true, // Fermé par défaut si en veille
           battery: typeof payload.battery === "number" ? payload.battery : 100,
           tamper: Boolean(payload.tamper),
           lqi: typeof payload.linkquality === "number" ? payload.linkquality : 200,
+          hasReceivedPayload: payload.contact !== undefined,
         };
       } else if (isPlug && !detectedPlug) {
         detectedPlug = {
-          name,
+          id,
+          name: displayName,
           state: String(payload.state || "OFF").toUpperCase(),
           power: typeof payload.power === "number" ? payload.power : 0,
           voltage: typeof payload.voltage === "number" ? payload.voltage : 230,
           lqi: typeof payload.linkquality === "number" ? payload.linkquality : 180,
         };
-      } else {
+      } else if (id !== DEFAULT_DOOR_ID && id !== DEFAULT_PLUG_ID) {
         others.push({
-          name,
+          name: displayName,
           type: isDoor ? "Capteur Porte" : isPlug ? "Prise" : "Appareil Zigbee",
-          info: payload.contact !== undefined ? (payload.contact ? "Fermé" : "Ouvert") : String(payload.state || "Connecté"),
+          info: payload.contact !== undefined ? (payload.contact ? "Fermé" : "Ouvert") : String(payload.state || "Prêt"),
         });
       }
     }
@@ -276,7 +354,7 @@ export default function DomotikDashboard() {
       plug: detectedPlug,
       allDevices: others,
     };
-  }, [isKeyConnected, mqttStatus, payloadsMap]);
+  }, [isKeyConnected, mqttStatus, payloadsMap, customNames]);
 
   // Surveillance porte pour les notifications navigateur
   useEffect(() => {
@@ -430,7 +508,7 @@ export default function DomotikDashboard() {
                           onClick={() =>
                             setRenameModal({
                               open: true,
-                              currentName: doorSensor.name,
+                              currentName: doorSensor.id,
                               newName: doorSensor.name,
                             })
                           }
@@ -450,6 +528,9 @@ export default function DomotikDashboard() {
                         >
                           {doorSensor.contact ? "Fermée" : "Ouverte"}
                         </span>
+                        {!doorSensor.hasReceivedPayload && (
+                          <span className="text-[10px] text-slate-500 font-mono">(En attente de signal)</span>
+                        )}
                         {doorSensor.tamper && (
                           <span className="inline-flex items-center gap-1 text-[11px] text-amber-400">
                             <AlertCircle className="w-3 h-3" /> Altéré
@@ -488,13 +569,28 @@ export default function DomotikDashboard() {
                       <Power className="w-5 h-5" />
                     </div>
                     <div>
-                      <h3 className="text-sm font-semibold text-white">{plug.name}</h3>
+                      <div className="flex items-center gap-2">
+                        <h3 className="text-sm font-semibold text-white">{plug.name}</h3>
+                        <button
+                          onClick={() =>
+                            setRenameModal({
+                              open: true,
+                              currentName: plug.id,
+                              newName: plug.name,
+                            })
+                          }
+                          className="text-slate-500 hover:text-slate-300 p-0.5"
+                          title="Renommer"
+                        >
+                          <Edit2 className="w-3 h-3" />
+                        </button>
+                      </div>
                       <p className="text-xs text-slate-400 mt-0.5">{plug.power} W • {plug.voltage} V</p>
                     </div>
                   </div>
 
                   <button
-                    onClick={() => togglePlug(plug.name, plug.state)}
+                    onClick={() => togglePlug(plug.id, plug.state)}
                     className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold transition ${
                       plug.state === "ON"
                         ? "bg-amber-500 text-slate-950 hover:bg-amber-400"

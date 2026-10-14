@@ -1,13 +1,4 @@
 services:
-  tunnel:
-    image: cloudflare/cloudflared:latest
-    command: tunnel run
-    environment:
-      TUNNEL_TOKEN: ${TUNNEL_TOKEN}
-    restart: unless-stopped
-    networks:
-      - proxy
-
   nextjs:
     build:
       context: ./domotik
@@ -31,4 +22,3 @@ networks:
   proxy:
     name: proxy_network
     external: true
-
