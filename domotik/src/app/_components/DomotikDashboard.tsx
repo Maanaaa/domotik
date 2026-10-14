@@ -528,9 +528,9 @@ export default function DomotikDashboard() {
                         >
                           {doorSensor.contact ? "Fermée" : "Ouverte"}
                         </span>
-                        {!doorSensor.hasReceivedPayload && (
-                          <span className="text-[10px] text-slate-500 font-mono">(En attente de signal)</span>
-                        )}
+                        <span className="text-[10px] text-slate-400 font-mono">
+                          {doorSensor.hasReceivedPayload ? "En direct" : "Connecté (en veille)"}
+                        </span>
                         {doorSensor.tamper && (
                           <span className="inline-flex items-center gap-1 text-[11px] text-amber-400">
                             <AlertCircle className="w-3 h-3" /> Altéré
